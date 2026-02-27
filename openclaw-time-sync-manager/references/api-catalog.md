@@ -1,66 +1,44 @@
-# API Catalog
+﻿# API Catalog (Official SuperSync)
 
-This reference defines each API used by the skill and when to call it.
+This reference describes the actual endpoints exposed by `https://sync.super-productivity.com`.
 
-## Global Request Rules
+## Canonical API Profile
 
-1. For non-ASCII text (for example Chinese task titles/notes), always send:
-- `Content-Type: application/json; charset=utf-8`
-- request body encoded as UTF-8 bytes
-2. For mutation requests, always send an idempotency key (`requestId`).
-3. Before mutation, refresh sync state first and build mutation clock from latest server state.
-4. After mutation, re-read by `taskId` and verify key fields (`title`, `notes`, `dueWithTime`/`dueDay`).
-5. If post-write verification fails, run one corrective `PATCH` and verify again.
+- Base URL: `https://sync.super-productivity.com`
+- Protocol: HTTPS REST (JSON)
+- Auth: `Authorization: Bearer <token>`
+- Main prefix: `/api/sync/*`
+- Health endpoint: `/health`
+- Important: There is no official `/v1/tasks` or `/v1/connect` on this host.
 
-## 1) Connection APIs
+## 1) Health and Auth Context
 
-### `POST /v1/connect`
+### `GET /health`
 
-Purpose: initialize gateway settings for cloud sync.
+Purpose: server liveness and DB connectivity check.
 
-Use when:
+Auth: none.
 
-- session starts
-- endpoint/token/clientId changes
+Typical response:
 
-Input:
-
-- `baseUrl`
-- `bearerToken`
-- `clientId`
-- `schemaVersion`
-
-Output:
-
-- `ok`
-- `latestSeq`
+- `status`
+- `db`
 
 ---
 
-### `GET /v1/health`
+### Auth model for sync endpoints
 
-Purpose: verify gateway and cloud reachability.
+All `/api/sync/*` endpoints require:
 
-Use when:
+- `Authorization: Bearer <token>`
 
-- before first task command
-- troubleshooting connectivity issues
+Without token or with invalid token: `401`.
 
-Output:
+## 2) Core Sync Endpoints
 
-- `ok`
-- `serverTime` (optional)
+### `GET /api/sync/status`
 
-## 2) Sync APIs
-
-### `GET /v1/sync/status`
-
-Purpose: read sync metadata.
-
-Use when:
-
-- reporting sync health
-- deciding whether cache is stale
+Purpose: inspect sync state and quota.
 
 Output:
 
@@ -71,237 +49,167 @@ Output:
 
 ---
 
-### `POST /v1/sync/pull`
+### `GET /api/sync/ops?sinceSeq={seq}&limit={limit}&excludeClient={clientId}`
 
-Purpose: pull remote operations into local DB.
+Purpose: download incremental operations.
 
 Use when:
 
-- before all writes (mandatory)
-- before reads if cache stale
-- after writes to verify propagation and get latest vector clock basis
-
-Input:
-
-- `limit` (optional)
+- pre-write pull
+- post-write verification pull
+- normal refresh
 
 Output:
 
-- `latestSeq`
-- `fetchedOps`
+- `ops[]`
 - `hasMore`
-
----
-
-### `POST /v1/sync/run`
-
-Purpose: active sync execution (manual command).
-
-Use when:
-
-- user asks "sync now"
-- retrying after transient network errors
-
-Input:
-
-- `mode`: `pull_only | push_only | two_way`
-
-Output:
-
 - `latestSeq`
-- `pushedOps`
-- `fetchedOps`
-- `ok`
+- optional `gapDetected`
+- optional `latestSnapshotSeq`
+- optional `snapshotVectorClock`
+- optional `serverTime`
 
 ---
 
-### `POST /v1/sync/schedule`
+### `POST /api/sync/ops`
 
-Purpose: configure periodic sync.
+Purpose: upload operations (create/update/delete/move/batch/full-state ops).
 
-Use when:
+Body:
 
-- user asks to enable/change timed sync
+- `clientId`
+- `ops[]`
+- optional `lastKnownServerSeq`
+- optional `requestId` (dedup for retries)
 
-Input:
+Operation shape (per item):
 
-- `enabled` (boolean)
-- `intervalSec` (for example 300)
-- `mode` (default `two_way`)
+- `id`
+- `clientId`
+- `actionType`
+- `opType` (`CRT|UPD|DEL|MOV|BATCH|SYNC_IMPORT|BACKUP_IMPORT|REPAIR`)
+- `entityType` (for task use `TASK`)
+- `entityId` (or `entityIds` for bulk)
+- `payload`
+- `vectorClock`
+- `timestamp`
+- `schemaVersion`
 
 Output:
 
-- `enabled`
-- `intervalSec`
-- `nextRunAt`
+- `results[]` (`accepted`, `serverSeq`, `opId`)
+- `latestSeq`
+
+## 3) Snapshot and Maintenance Endpoints
+
+### `GET /api/sync/snapshot`
+
+Purpose: fetch full snapshot.
 
 ---
 
-### `GET /v1/sync/schedule`
+### `POST /api/sync/snapshot`
 
-Purpose: read periodic sync config/state.
-
-Use when:
-
-- user asks "is auto-sync enabled?"
-
-Output:
-
-- `enabled`
-- `intervalSec`
-- `lastRunAt`
-- `nextRunAt`
+Purpose: upload full snapshot (migration/recovery/initialization).
 
 ---
 
-### `DELETE /v1/sync/schedule`
+### `DELETE /api/sync/data`
 
-Purpose: disable periodic sync.
+Purpose: destructive reset of all sync data for authenticated user.
 
-Use when:
-
-- user explicitly asks to stop auto-sync
-
-Output:
-
-- `ok`
-
-## 3) Task Query APIs
-
-### `GET /v1/tasks`
-
-Purpose: query tasks from local DB/cache.
-
-Use when:
-
-- list tasks by status/date/project
-- answer "today/this week plan"
-
-Query:
-
-- `status`: `open | done | all`
-- `dueFrom`
-- `dueTo`
-- `projectId`
-
-Output:
-
-- `items[]` task list
+Use only on explicit destructive user request.
 
 ---
 
-### `GET /v1/tasks/{taskId}`
+### `GET /api/sync/restore-points?limit={n}`
 
-Purpose: fetch one task detail.
-
-Use when:
-
-- user references a single task by id
-- pre-check before patch/complete/reopen
-
-Output:
-
-- task object
-
-## 4) Task Mutation APIs
-
-All mutation APIs must include idempotency semantics (`requestId` or equivalent).
-
-### `POST /v1/tasks`
-
-Purpose: create a task.
-
-Use when:
-
-- user asks to add a task
-
-Expected behavior:
-
-1. pre-sync pull
-2. create
-3. post-sync pull
-4. read by `taskId` and verify stored fields
-
-Output:
-
-- `ok`
-- `opId`
-- `serverSeq`
+Purpose: list restore points.
 
 ---
 
-### `PATCH /v1/tasks/{taskId}`
+### `GET /api/sync/restore/{serverSeq}`
 
-Purpose: update task fields.
+Purpose: reconstruct snapshot at a given sequence.
 
-Use when:
+## 4) Task Semantics on Official API
 
-- title/date/project/tags/notes/status change
+There is no direct task CRUD REST endpoint on this host.
 
-Expected behavior:
+Task operations must be encoded through:
 
-1. pre-sync pull
-2. patch
-3. post-sync pull
-4. read by `taskId` and verify stored fields
+- `POST /api/sync/ops` with `entityType: "TASK"`
+- `opType` chosen by intent:
+  - create -> `CRT`
+  - update/complete/reopen -> `UPD`
+  - delete -> `DEL`
 
-Output:
+Task intent to op mapping:
 
-- `ok`
-- `opId`
-- `serverSeq`
+- create task -> `actionType: [Task Shared] addTask`, `opType: CRT`
+- update title/notes/due -> `actionType: [Task Shared] updateTask`, `opType: UPD`
+- complete/reopen -> `actionType: [Task Shared] updateTask`, `opType: UPD`
+- delete task -> delete action type, `opType: DEL`
 
----
+Read task state via:
 
-### `POST /v1/tasks/{taskId}/complete`
+- downloaded operations (`GET /api/sync/ops`) and/or snapshot (`GET /api/sync/snapshot`)
+- then materialize to local task view.
 
-Purpose: mark task done.
+## 5) Encoding and Verification Rules
 
-Use when:
+1. For non-ASCII text (Chinese, etc.):
+- send `Content-Type: application/json; charset=utf-8`
+- send body as UTF-8 bytes
+2. Always send `requestId` on mutation uploads.
+3. Mutation loop must be: pull -> upload ops -> pull.
+4. Verify target fields after write (`title`, `notes`, `dueWithTime`/`dueDay`).
+5. If verification fails (mojibake or wrong final state), do one corrective `UPD` and verify again.
 
-- user says complete/finish/done
+## 6) Minimal Mutation Example (Task Create)
 
-Output:
+`POST /api/sync/ops` body outline:
 
-- `ok`
-- `opId`
-- `serverSeq`
+```json
+{
+  "clientId": "your_client_id",
+  "requestId": "req_xxx",
+  "ops": [
+    {
+      "id": "uuid",
+      "clientId": "your_client_id",
+      "actionType": "[Task Shared] addTask",
+      "opType": "CRT",
+      "entityType": "TASK",
+      "entityId": "task_xxx",
+      "payload": {
+        "actionPayload": {
+          "task": {
+            "id": "task_xxx",
+            "title": "Dinner at 6 PM"
+          }
+        },
+        "entityChanges": []
+      },
+      "vectorClock": {
+        "your_client_id": 1
+      },
+      "timestamp": 1772180000000,
+      "schemaVersion": 2
+    }
+  ]
+}
+```
 
----
+## 7) Agent Execution Checklist
 
-### `POST /v1/tasks/{taskId}/reopen`
-
-Purpose: reopen done task.
-
-Use when:
-
-- user says reopen/undo complete
-
-Output:
-
-- `ok`
-- `opId`
-- `serverSeq`
-
-## 5) Auto-Invocation Rules For Time Commands
-
-1. Query command:
-- stale cache -> `pull`
-- then query API
-
-2. Mutation command:
-- `pull` -> mutation -> `pull`
-- verify by `taskId`
-- if conflict, repeat once after pull+merge
-- if encoding/state mismatch, do one corrective patch + verify
-
-3. Manual sync command:
-- call `sync/run(two_way)` directly
-
-4. Periodic sync command:
-- configure with `sync/schedule` APIs
-
-5. All responses should include:
-- changed entities
-- sync result (`latestSeq`)
-- operation trace (`opId` or request id)
+1. `GET /api/sync/status` to confirm auth and service state.
+2. `GET /api/sync/ops?sinceSeq=<lastSeq>&limit=<n>` to pull latest state and clocks.
+3. Build one valid `TASK` operation with required fields.
+4. `POST /api/sync/ops` with `requestId` and UTF-8 body.
+5. Ensure upload response has `results[0].accepted = true`.
+6. Pull again with `GET /api/sync/ops` and verify:
+- returned `latestSeq` advanced
+- target `entityId` op exists
+- target fields (`title`, `notes`, `dueWithTime`/`dueDay`) are correct
+7. If mismatch, send one corrective `UPD` and verify again.

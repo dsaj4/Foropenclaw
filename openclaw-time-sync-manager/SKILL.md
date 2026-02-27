@@ -11,6 +11,14 @@ metadata: '{"openclaw":{"homepage":"https://github.com/super-productivity/super-
 
 This skill manages time/task commands by keeping local and cloud state consistent through a sync-first API workflow.
 
+Protocol profile used by this skill:
+
+- Base URL: `https://sync.super-productivity.com`
+- Protocol: HTTPS REST (JSON)
+- Auth: `Authorization: Bearer <token>`
+- Sync path prefix: `/api/sync/*`
+- Important: Official SuperSync does **not** provide `/v1/tasks` or `/v1/connect`
+
 Reference file:
 
 - `{baseDir}/references/api-catalog.md`
@@ -56,7 +64,7 @@ Example:
 - Extracted intent:
   - title: `写作业`
   - dueWithTime: tomorrow 10:00 (local timezone)
-  - operation: `POST /v1/tasks` (with pre/post sync)
+  - operation: `POST /api/sync/ops` with `opType=CRT`, `entityType=TASK` (with pre/post sync)
 
 If date is present without exact time ("明天上午"), map to default time `10:00`.
 If only date is present ("明天"), set `dueDay` and leave `dueWithTime` empty.
@@ -79,13 +87,42 @@ Defaults used by the skill runtime:
 Apply this fixed execution loop:
 
 1. `Intent -> Plan -> API -> Verify -> Respond`
-2. Before every write: run `POST /v1/sync/pull`
-3. After every write: run `POST /v1/sync/pull`
-4. Use idempotency key (`requestId`) for mutations
-5. Build mutation vector clock from latest server state (do not use stale local clock)
-6. On conflict: pull latest -> merge once -> retry once
+2. Before every write: run `GET /api/sync/ops` with current `sinceSeq`
+3. Write via `POST /api/sync/ops`
+4. After write: run `GET /api/sync/ops` again to verify server sequence progression
+5. Use idempotency key (`requestId`) for mutations
+6. Build mutation vector clock from latest server state (do not use stale local clock)
+7. On conflict: pull latest -> merge once -> retry once
 
 If retry still fails, return a conflict report and stop mutation.
+
+State handling:
+
+1. Persist `lastSeq` locally after every successful pull/upload.
+2. If `lastSeq` is unknown (first run), use `sinceSeq=0`.
+3. If server returns `gapDetected`, fetch/apply snapshot then continue from snapshot sequence.
+
+## Operation Contract (Do Not Omit)
+
+Every uploaded operation for task changes must include:
+
+1. `id` (UUID)
+2. `clientId` (same as request-level `clientId`)
+3. `actionType` (for task: `[Task Shared] addTask` or `[Task Shared] updateTask`)
+4. `opType` (`CRT` for create, `UPD` for update/complete/reopen, `DEL` for delete)
+5. `entityType` = `TASK`
+6. `entityId` = target task id
+7. `payload` using `actionPayload` + `entityChanges` envelope
+8. `vectorClock` (merged from latest known server clocks)
+9. `timestamp` (epoch ms)
+10. `schemaVersion` (use latest observed server schema when available)
+
+Request-level fields for `POST /api/sync/ops`:
+
+1. `clientId`
+2. `ops` (1..100)
+3. optional `lastKnownServerSeq`
+4. optional but recommended `requestId`
 
 ## Encoding Rules (Mandatory)
 
@@ -99,15 +136,15 @@ For any request containing non-ASCII text (for example Chinese task title/notes)
 
 ### A) Query command
 
-1. If cache is stale or user asks to refresh: `POST /v1/sync/pull`
-2. Query tasks: `GET /v1/tasks` or `GET /v1/tasks/{taskId}`
+1. If cache is stale or user asks to refresh: `GET /api/sync/ops`
+2. Build task view from synced operations / snapshot-derived local state
 3. Return normalized schedule/task result
 
 ### B) Mutation command
 
-1. `POST /v1/sync/pull`
-2. Task mutation API (`POST /v1/tasks`, `PATCH /v1/tasks/{id}`, `POST /v1/tasks/{id}/complete`, `POST /v1/tasks/{id}/reopen`)
-3. `POST /v1/sync/pull`
+1. `GET /api/sync/ops` (pre-pull)
+2. `POST /api/sync/ops` (task create/update/complete/reopen encoded as operations)
+3. `GET /api/sync/ops` (post-pull)
 4. Verify by `taskId` that key fields (`title`, `notes`, `dueWithTime`/`dueDay`) match expected values
 5. Return `opId` / `serverSeq` and verification status
 
@@ -115,14 +152,14 @@ For implicit creation intents, this sequence is mandatory and should run automat
 
 ### C) Manual sync command
 
-1. Call `POST /v1/sync/run` with mode `two_way`
-2. Return fetched/pushed counts
+1. Run `GET /api/sync/ops` and `POST /api/sync/ops` cycle once
+2. Return fetched/applied/uploaded operation counts
 
 ### D) Periodic sync command
 
-1. Enable/change: `POST /v1/sync/schedule`
-2. Read current schedule: `GET /v1/sync/schedule`
-3. Disable: `DELETE /v1/sync/schedule`
+1. Schedule local timer in agent runtime
+2. On each tick execute manual sync cycle (`GET /api/sync/ops` + `POST /api/sync/ops` when needed)
+3. Persist last run state locally
 
 ## Safety Limits
 
@@ -160,6 +197,7 @@ Use `~/.openclaw/openclaw.json`:
 ## Validation and Debug
 
 1. Verify load: `openclaw skills list`
-2. Verify token injection: run a task command and check first API call is `/v1/connect` or `/v1/sync/status`
-3. Verify sync loop: mutation must produce `pull -> mutate -> pull` sequence
+2. Verify token injection: run `GET /api/sync/status` and confirm authenticated response
+3. Verify sync loop: mutation must produce `pull -> upload ops -> pull` sequence
+4. Reject any plan that uses `/v1/*`, `/api/v1/*`, `/sync`, or WebSocket-only assumptions for this host
 

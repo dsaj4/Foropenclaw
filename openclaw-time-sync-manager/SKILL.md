@@ -288,6 +288,7 @@ For implicit creation intents, this sequence is mandatory and should run automat
 2. Do not delete all sync data unless user explicitly requests destructive reset.
 3. If task target is ambiguous, query candidates first, then ask disambiguation.
 4. If post-write verification fails (encoding mismatch or wrong final state), issue one corrective `UPD` and verify again.
+5. Do not treat `GET /api/sync/snapshot` `state.task.ids` as the only success signal for op-based task creation; verify by uploaded op acceptance and follow-up `/api/sync/ops` presence first.
 
 ## Response Format
 
@@ -321,4 +322,5 @@ Use `~/.openclaw/openclaw.json`:
 2. Verify token injection: run `GET /api/sync/status` and confirm authenticated response
 3. Verify sync loop: mutation must produce `pull -> upload ops -> pull` sequence
 4. Reject any plan that uses `/v1/*`, `/api/v1/*`, `/sync`, or WebSocket-only assumptions for this host
+5. If snapshot parse fails or seems inconsistent, check for mixed `task` and `TASK` keys and switch verification to op-log based checks (`/api/sync/ops`).
 

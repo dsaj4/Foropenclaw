@@ -213,3 +213,16 @@ Read task state via:
 - target `entityId` op exists
 - target fields (`title`, `notes`, `dueWithTime`/`dueDay`) are correct
 7. If mismatch, send one corrective `UPD` and verify again.
+
+## 8) Troubleshooting: Created But Not Displayed
+
+Symptom:
+
+- upload returns `accepted: true`, but custom viewer still shows "not created".
+
+Checks:
+
+1. Confirm endpoint path is `/api/sync/*` (not `/v1/*`).
+2. Confirm op is present in `GET /api/sync/ops` with expected `entityId/title`.
+3. If snapshot-based parser fails or result looks stale, inspect snapshot for mixed `task` and `TASK` keys.
+4. In that case, use op-log (`/api/sync/ops`) as source of truth for mutation verification.

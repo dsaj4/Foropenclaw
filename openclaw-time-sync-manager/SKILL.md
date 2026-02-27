@@ -132,6 +132,127 @@ For any request containing non-ASCII text (for example Chinese task title/notes)
 2. Send request body as UTF-8 bytes (not platform-default string encoding)
 3. After mutation, re-read the task and verify text fields are not mojibake/replacement chars
 
+## Chinese Task Examples (Create + Update)
+
+PowerShell example (UTF-8 safe):
+
+```powershell
+$base = "https://sync.super-productivity.com"
+$token = $env:SUPERSYNC_TOKEN
+$clientId = "openclaw_cli_demo"
+$taskId = [guid]::NewGuid().ToString()
+$now = [DateTimeOffset]::Now.ToUnixTimeMilliseconds()
+$headers = @{ Authorization = "Bearer $token"; "Content-Type" = "application/json; charset=utf-8" }
+
+# 1) Create: 晚上6点吃饭
+$create = @{
+  clientId = $clientId
+  requestId = "req_$([guid]::NewGuid().ToString('N'))"
+  ops = @(
+    @{
+      id = [guid]::NewGuid().ToString()
+      clientId = $clientId
+      actionType = "[Task Shared] addTask"
+      opType = "CRT"
+      entityType = "TASK"
+      entityId = $taskId
+      payload = @{
+        actionPayload = @{
+          task = @{
+            id = $taskId
+            title = "晚上6点吃饭"
+            isDone = $false
+            projectId = "INBOX_PROJECT"
+            dueWithTime = $now
+          }
+        }
+        entityChanges = @()
+      }
+      vectorClock = @{ $clientId = 1 }
+      timestamp = $now
+      schemaVersion = 2
+    }
+  )
+} | ConvertTo-Json -Depth 12
+
+$createBytes = [System.Text.Encoding]::UTF8.GetBytes($create)
+Invoke-RestMethod -Uri "$base/api/sync/ops" -Method Post -Headers $headers -Body $createBytes
+
+# 2) Update title: 晚上7点吃饭
+$update = @{
+  clientId = $clientId
+  requestId = "req_$([guid]::NewGuid().ToString('N'))"
+  ops = @(
+    @{
+      id = [guid]::NewGuid().ToString()
+      clientId = $clientId
+      actionType = "[Task Shared] updateTask"
+      opType = "UPD"
+      entityType = "TASK"
+      entityId = $taskId
+      payload = @{
+        actionPayload = @{
+          task = @{
+            id = $taskId
+            changes = @{ title = "晚上7点吃饭" }
+          }
+        }
+        entityChanges = @()
+      }
+      vectorClock = @{ $clientId = 2 }
+      timestamp = ([DateTimeOffset]::Now.ToUnixTimeMilliseconds())
+      schemaVersion = 2
+    }
+  )
+} | ConvertTo-Json -Depth 12
+
+$updateBytes = [System.Text.Encoding]::UTF8.GetBytes($update)
+Invoke-RestMethod -Uri "$base/api/sync/ops" -Method Post -Headers $headers -Body $updateBytes
+```
+
+cURL example:
+
+```bash
+BASE_URL="https://sync.super-productivity.com"
+TOKEN="$SUPERSYNC_TOKEN"
+CLIENT_ID="openclaw_cli_demo"
+TASK_ID="task_$(date +%s)"
+NOW_MS=$(($(date +%s%N)/1000000))
+
+curl -sS "$BASE_URL/api/sync/ops" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json; charset=utf-8" \
+  --data-binary @- <<JSON
+{
+  "clientId": "$CLIENT_ID",
+  "requestId": "req_create_$NOW_MS",
+  "ops": [{
+    "id": "11111111-1111-4111-8111-111111111111",
+    "clientId": "$CLIENT_ID",
+    "actionType": "[Task Shared] addTask",
+    "opType": "CRT",
+    "entityType": "TASK",
+    "entityId": "$TASK_ID",
+    "payload": {
+      "actionPayload": {
+        "task": {
+          "id": "$TASK_ID",
+          "title": "晚上6点吃饭",
+          "isDone": false,
+          "projectId": "INBOX_PROJECT",
+          "dueWithTime": $NOW_MS
+        }
+      },
+      "entityChanges": []
+    },
+    "vectorClock": { "$CLIENT_ID": 1 },
+    "timestamp": $NOW_MS,
+    "schemaVersion": 2
+  }]
+}
+JSON
+```
+
 ## API Auto-Call Rules
 
 ### A) Query command

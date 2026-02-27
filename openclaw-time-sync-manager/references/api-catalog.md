@@ -2,6 +2,16 @@
 
 This reference defines each API used by the skill and when to call it.
 
+## Global Request Rules
+
+1. For non-ASCII text (for example Chinese task titles/notes), always send:
+- `Content-Type: application/json; charset=utf-8`
+- request body encoded as UTF-8 bytes
+2. For mutation requests, always send an idempotency key (`requestId`).
+3. Before mutation, refresh sync state first and build mutation clock from latest server state.
+4. After mutation, re-read by `taskId` and verify key fields (`title`, `notes`, `dueWithTime`/`dueDay`).
+5. If post-write verification fails, run one corrective `PATCH` and verify again.
+
 ## 1) Connection APIs
 
 ### `POST /v1/connect`
@@ -69,7 +79,7 @@ Use when:
 
 - before all writes (mandatory)
 - before reads if cache stale
-- after writes to verify propagation
+- after writes to verify propagation and get latest vector clock basis
 
 Input:
 
@@ -210,6 +220,7 @@ Expected behavior:
 1. pre-sync pull
 2. create
 3. post-sync pull
+4. read by `taskId` and verify stored fields
 
 Output:
 
@@ -226,6 +237,13 @@ Purpose: update task fields.
 Use when:
 
 - title/date/project/tags/notes/status change
+
+Expected behavior:
+
+1. pre-sync pull
+2. patch
+3. post-sync pull
+4. read by `taskId` and verify stored fields
 
 Output:
 
@@ -273,7 +291,9 @@ Output:
 
 2. Mutation command:
 - `pull` -> mutation -> `pull`
+- verify by `taskId`
 - if conflict, repeat once after pull+merge
+- if encoding/state mismatch, do one corrective patch + verify
 
 3. Manual sync command:
 - call `sync/run(two_way)` directly
@@ -285,4 +305,3 @@ Output:
 - changed entities
 - sync result (`latestSeq`)
 - operation trace (`opId` or request id)
-

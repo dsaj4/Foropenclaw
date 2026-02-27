@@ -1,10 +1,10 @@
 ﻿---
 name: openclaw-time-sync-manager
-description: "Use this skill to execute time-management commands with API-based local/cloud database sync, including periodic sync and manual sync."
+description: "Use this skill to execute time-management commands with token-only API sync between local and cloud data."
 homepage: "https://github.com/super-productivity/super-productivity"
 user-invocable: true
 disable-model-invocation: false
-metadata: '{"openclaw":{"homepage":"https://github.com/super-productivity/super-productivity","requires":{"bins":["curl"],"env":["SUPERSYNC_BASE_URL","SUPERSYNC_TOKEN","SUPERSYNC_CLIENT_ID"]},"primaryEnv":"SUPERSYNC_TOKEN","install":[{"id":"curl-brew","kind":"brew","formula":"curl","bins":["curl"],"label":"Install curl (brew)"},{"id":"curl-download","kind":"download","url":"https://curl.se/download.html","label":"Download curl"}]}}'
+metadata: '{"openclaw":{"homepage":"https://github.com/super-productivity/super-productivity","requires":{"bins":["curl"],"env":["SUPERSYNC_TOKEN"]},"primaryEnv":"SUPERSYNC_TOKEN","install":[{"id":"curl-brew","kind":"brew","formula":"curl","bins":["curl"],"label":"Install curl (brew)"},{"id":"curl-download","kind":"download","url":"https://curl.se/download.html","label":"Download curl"}]}}'
 ---
 
 # OpenClaw Time Sync Manager
@@ -63,13 +63,16 @@ If only date is present ("明天"), set `dueDay` and leave `dueWithTime` empty.
 
 ## Required Environment
 
-The skill expects these environment variables:
+The skill requires only:
 
-- `SUPERSYNC_BASE_URL`
 - `SUPERSYNC_TOKEN`
-- `SUPERSYNC_CLIENT_ID`
 
 `SUPERSYNC_TOKEN` is the `primaryEnv` and can be injected by `skills.entries.<skill>.apiKey`.
+
+Defaults used by the skill runtime:
+
+- `baseUrl`: `https://sync.super-productivity.com` (unless runtime overrides it)
+- `clientId`: auto-generated from token claims and host fingerprint (no manual config needed)
 
 ## Runtime Workflow
 
@@ -79,9 +82,18 @@ Apply this fixed execution loop:
 2. Before every write: run `POST /v1/sync/pull`
 3. After every write: run `POST /v1/sync/pull`
 4. Use idempotency key (`requestId`) for mutations
-5. On conflict: pull latest -> merge once -> retry once
+5. Build mutation vector clock from latest server state (do not use stale local clock)
+6. On conflict: pull latest -> merge once -> retry once
 
 If retry still fails, return a conflict report and stop mutation.
+
+## Encoding Rules (Mandatory)
+
+For any request containing non-ASCII text (for example Chinese task title/notes):
+
+1. Send `Content-Type: application/json; charset=utf-8`
+2. Send request body as UTF-8 bytes (not platform-default string encoding)
+3. After mutation, re-read the task and verify text fields are not mojibake/replacement chars
 
 ## API Auto-Call Rules
 
@@ -96,7 +108,8 @@ If retry still fails, return a conflict report and stop mutation.
 1. `POST /v1/sync/pull`
 2. Task mutation API (`POST /v1/tasks`, `PATCH /v1/tasks/{id}`, `POST /v1/tasks/{id}/complete`, `POST /v1/tasks/{id}/reopen`)
 3. `POST /v1/sync/pull`
-4. Return `opId` / `serverSeq` and verification status
+4. Verify by `taskId` that key fields (`title`, `notes`, `dueWithTime`/`dueDay`) match expected values
+5. Return `opId` / `serverSeq` and verification status
 
 For implicit creation intents, this sequence is mandatory and should run automatically without asking for API confirmation.
 
@@ -116,6 +129,7 @@ For implicit creation intents, this sequence is mandatory and should run automat
 1. Do not use full snapshot overwrite APIs for normal task operations.
 2. Do not delete all sync data unless user explicitly requests destructive reset.
 3. If task target is ambiguous, query candidates first, then ask disambiguation.
+4. If post-write verification fails (encoding mismatch or wrong final state), issue one corrective `UPD` and verify again.
 
 ## Response Format
 
@@ -136,11 +150,7 @@ Use `~/.openclaw/openclaw.json`:
     "entries": {
       "openclaw-time-sync-manager": {
         "enabled": true,
-        "apiKey": "YOUR_SUPERSYNC_TOKEN",
-        "env": {
-          "SUPERSYNC_BASE_URL": "https://sync.example.com",
-          "SUPERSYNC_CLIENT_ID": "obsidian_local_client"
-        }
+        "apiKey": "YOUR_SUPERSYNC_TOKEN"
       }
     }
   }
@@ -150,6 +160,6 @@ Use `~/.openclaw/openclaw.json`:
 ## Validation and Debug
 
 1. Verify load: `openclaw skills list`
-2. Verify env injection: run a task command and check first API call is `/v1/connect` or `/v1/sync/status`
+2. Verify token injection: run a task command and check first API call is `/v1/connect` or `/v1/sync/status`
 3. Verify sync loop: mutation must produce `pull -> mutate -> pull` sequence
 

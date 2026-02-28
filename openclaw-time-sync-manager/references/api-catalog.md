@@ -156,6 +156,12 @@ Read task state via:
 - downloaded operations (`GET /api/sync/ops`) and/or snapshot (`GET /api/sync/snapshot`)
 - then materialize to local task view.
 
+Read priority:
+
+1. Primary: op-log from `GET /api/sync/ops`
+2. Fallback: snapshot (`GET /api/sync/snapshot`) with normalization for both `task` and `TASK`
+3. Do not use `snapshot.state.task.ids` alone as success/failure criterion
+
 ## 5) Encoding and Verification Rules
 
 1. For non-ASCII text (Chinese, etc.):
@@ -213,6 +219,7 @@ Read task state via:
 - target `entityId` op exists
 - target fields (`title`, `notes`, `dueWithTime`/`dueDay`) are correct
 7. If mismatch, send one corrective `UPD` and verify again.
+8. If snapshot is needed for display, merge `state.task` and `state.TASK`, dedupe by `taskId`, then render.
 
 ## 8) Troubleshooting: Created But Not Displayed
 

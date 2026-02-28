@@ -258,8 +258,11 @@ JSON
 ### A) Query command
 
 1. If cache is stale or user asks to refresh: `GET /api/sync/ops`
-2. Build task view from synced operations / snapshot-derived local state
-3. Return normalized schedule/task result
+2. Build task view from op-log (`/api/sync/ops`) as primary source of truth
+3. Only if op-log is unavailable, use snapshot fallback and normalize both `state.task` and `state.TASK`
+4. For snapshot fallback, deduplicate by `taskId` and prefer newer `timestamp/modified`
+5. Never mark create/update as failed based only on `snapshot.state.task.ids`
+6. Return normalized schedule/task result
 
 ### B) Mutation command
 

@@ -11,6 +11,20 @@ metadata: '{"openclaw":{"homepage":"https://github.com/super-productivity/super-
 
 This skill manages time/task commands by keeping local and cloud state consistent through a sync-first API workflow.
 
+## Critical Multi-Client Visibility Rules
+
+This project has repeated multi-client "created but not visible" incidents. Treat the rules below as mandatory:
+
+1. `GET /api/sync/ops` must always include `sinceSeq` (for example `sinceSeq=0` on first pull). Calling without `sinceSeq` is invalid and causes `Validation failed`.
+2. Success/failure for create/update must be judged by op-log, not by snapshot list fields.
+3. Primary verification signal is:
+`POST /api/sync/ops` -> `results[].accepted=true` and follow-up `GET /api/sync/ops` contains the target `entityId`.
+4. Never conclude failure only because `snapshot.state.task.ids` does not contain the task.
+5. If snapshot is used for display fallback, normalize both `state.task` and `state.TASK`, then deduplicate by `taskId`.
+6. Every mutation must follow: `pre-pull(with sinceSeq) -> upload -> post-pull(with sinceSeq) -> verify in ops`.
+
+If any step above is skipped, the result is considered non-deterministic and not production-safe.
+
 Protocol profile used by this skill:
 
 - Base URL: `https://sync.super-productivity.com`
@@ -87,9 +101,9 @@ Defaults used by the skill runtime:
 Apply this fixed execution loop:
 
 1. `Intent -> Plan -> API -> Verify -> Respond`
-2. Before every write: run `GET /api/sync/ops` with current `sinceSeq`
+2. Before every write: run `GET /api/sync/ops` with current `sinceSeq` (required)
 3. Write via `POST /api/sync/ops`
-4. After write: run `GET /api/sync/ops` again to verify server sequence progression
+4. After write: run `GET /api/sync/ops` again with `sinceSeq` to verify server sequence progression
 5. Use idempotency key (`requestId`) for mutations
 6. Build mutation vector clock from latest server state (do not use stale local clock)
 7. On conflict: pull latest -> merge once -> retry once
@@ -257,7 +271,7 @@ JSON
 
 ### A) Query command
 
-1. If cache is stale or user asks to refresh: `GET /api/sync/ops`
+1. If cache is stale or user asks to refresh: `GET /api/sync/ops?sinceSeq=<lastSeq>&limit=<n>`
 2. Build task view from op-log (`/api/sync/ops`) as primary source of truth
 3. Only if op-log is unavailable, use snapshot fallback and normalize both `state.task` and `state.TASK`
 4. For snapshot fallback, deduplicate by `taskId` and prefer newer `timestamp/modified`
@@ -266,9 +280,9 @@ JSON
 
 ### B) Mutation command
 
-1. `GET /api/sync/ops` (pre-pull)
+1. `GET /api/sync/ops?sinceSeq=<lastSeq>&limit=<n>` (pre-pull, required)
 2. `POST /api/sync/ops` (task create/update/complete/reopen encoded as operations)
-3. `GET /api/sync/ops` (post-pull)
+3. `GET /api/sync/ops?sinceSeq=<lastSeq>&limit=<n>` (post-pull, required)
 4. Verify by `taskId` that key fields (`title`, `notes`, `dueWithTime`/`dueDay`) match expected values
 5. Return `opId` / `serverSeq` and verification status
 
@@ -276,13 +290,13 @@ For implicit creation intents, this sequence is mandatory and should run automat
 
 ### C) Manual sync command
 
-1. Run `GET /api/sync/ops` and `POST /api/sync/ops` cycle once
+1. Run `GET /api/sync/ops?sinceSeq=<lastSeq>&limit=<n>` and `POST /api/sync/ops` cycle once
 2. Return fetched/applied/uploaded operation counts
 
 ### D) Periodic sync command
 
 1. Schedule local timer in agent runtime
-2. On each tick execute manual sync cycle (`GET /api/sync/ops` + `POST /api/sync/ops` when needed)
+2. On each tick execute manual sync cycle (`GET /api/sync/ops?sinceSeq=<lastSeq>&limit=<n>` + `POST /api/sync/ops` when needed)
 3. Persist last run state locally
 
 ## Safety Limits
@@ -326,4 +340,5 @@ Use `~/.openclaw/openclaw.json`:
 3. Verify sync loop: mutation must produce `pull -> upload ops -> pull` sequence
 4. Reject any plan that uses `/v1/*`, `/api/v1/*`, `/sync`, or WebSocket-only assumptions for this host
 5. If snapshot parse fails or seems inconsistent, check for mixed `task` and `TASK` keys and switch verification to op-log based checks (`/api/sync/ops`).
+6. If pre-pull or post-pull was called without `sinceSeq`, treat the run as invalid and rerun from step 1.
 

@@ -2,6 +2,18 @@
 
 This reference describes the actual endpoints exposed by `https://sync.super-productivity.com`.
 
+## Critical Multi-Client Visibility Rules
+
+1. `GET /api/sync/ops` must include `sinceSeq` (`sinceSeq=0` on first pull).
+2. Calling `/api/sync/ops` without `sinceSeq` is invalid and should be treated as a failed run.
+3. Mutation success is determined by op-log evidence:
+- upload response `results[].accepted=true`
+- post-pull `/api/sync/ops` contains target `entityId`
+4. Never use only `snapshot.state.task.ids` to decide create/update failure.
+5. If snapshot is used for rendering, normalize both `state.task` and `state.TASK`, then dedupe by `taskId`.
+6. Required mutation cycle:
+- pre-pull (with `sinceSeq`) -> upload -> post-pull (with `sinceSeq`) -> verify in ops.
+
 ## Canonical API Profile
 
 - Base URL: `https://sync.super-productivity.com`
@@ -68,6 +80,10 @@ Output:
 - optional `latestSnapshotSeq`
 - optional `snapshotVectorClock`
 - optional `serverTime`
+
+Hard requirement:
+
+- requests without `sinceSeq` are invalid for this workflow.
 
 ---
 
@@ -220,6 +236,7 @@ Read priority:
 - target fields (`title`, `notes`, `dueWithTime`/`dueDay`) are correct
 7. If mismatch, send one corrective `UPD` and verify again.
 8. If snapshot is needed for display, merge `state.task` and `state.TASK`, dedupe by `taskId`, then render.
+9. If any pre-pull/post-pull call omitted `sinceSeq`, mark the run invalid and rerun from step 1.
 
 ## 8) Troubleshooting: Created But Not Displayed
 

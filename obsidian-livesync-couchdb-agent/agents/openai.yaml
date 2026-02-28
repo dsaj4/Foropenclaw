@@ -1,0 +1,4 @@
+interface:
+  display_name: "LiveSync CouchDB Agent"
+  short_description: "Deploy and safely edit Obsidian LiveSync CouchDB docs"
+  default_prompt: "Deploy a LiveSync-compatible CouchDB and modify remote docs with rollback-enforced operations (backup, snapshot, manifest, rev-aware write)."

@@ -1,6 +1,6 @@
-﻿---
+---
 name: openclaw-time-sync-manager
-description: "Use this skill to execute time-management commands with token-only API sync between local and cloud data."
+description: "Use this skill to execute time/task commands with token-only API sync between local and cloud data."
 homepage: "https://github.com/super-productivity/super-productivity"
 user-invocable: true
 disable-model-invocation: false
@@ -9,316 +9,175 @@ metadata: '{"openclaw":{"homepage":"https://github.com/super-productivity/super-
 
 # OpenClaw Time Sync Manager
 
-This skill manages time/task commands by keeping local and cloud state consistent through a sync-first API workflow.
+Token-only SuperSync workflow for creating/updating tasks safely across multiple clients.
 
-## Critical Multi-Client Visibility Rules
+## Protocol
 
-This project has repeated multi-client "created but not visible" incidents. Treat the rules below as mandatory:
+1. Base URL: `https://sync.super-productivity.com`
+2. Auth: `Authorization: Bearer <SUPERSYNC_TOKEN>`
+3. Prefix: `/api/sync/*`
+4. Do not use `/v1/*` or `/api/v1/*` on this host.
 
-1. `GET /api/sync/ops` must always include `sinceSeq` (for example `sinceSeq=0` on first pull). Calling without `sinceSeq` is invalid and causes `Validation failed`.
-2. Success/failure for create/update must be judged by op-log, not by snapshot list fields.
-3. Primary verification signal is:
-`POST /api/sync/ops` -> `results[].accepted=true` and follow-up `GET /api/sync/ops` contains the target `entityId`.
-4. Never conclude failure only because `snapshot.state.task.ids` does not contain the task.
-5. If snapshot is used for display fallback, normalize both `state.task` and `state.TASK`, then deduplicate by `taskId`.
-6. Every mutation must follow: `pre-pull(with sinceSeq) -> upload -> post-pull(with sinceSeq) -> verify in ops`.
-
-If any step above is skipped, the result is considered non-deterministic and not production-safe.
-
-Protocol profile used by this skill:
-
-- Base URL: `https://sync.super-productivity.com`
-- Protocol: HTTPS REST (JSON)
-- Auth: `Authorization: Bearer <token>`
-- Sync path prefix: `/api/sync/*`
-- Important: Official SuperSync does **not** provide `/v1/tasks` or `/v1/connect`
-
-Reference file:
-
-- `{baseDir}/references/api-catalog.md`
+Reference: `{baseDir}/references/api-catalog.md`
 
 ## Trigger Conditions
 
-Use this skill when user intent includes explicit commands OR implicit planning statements.
+Use this skill when user intent is task/time sync related:
 
-Explicit intents:
+1. Explicit: create/update/complete/reopen/delete task, sync now, periodic sync.
+2. Implicit: commitment + schedule cue (for example "明天上午10点写作业") -> create task.
+3. If ambiguity is high (multiple candidate tasks or unclear date), ask one concise clarification.
 
-- creating/updating/completing/reopening/deleting tasks
-- requesting today/weekly schedule
-- asking for "sync now"
-- enabling/disabling/changing periodic sync
+## Critical Rules (Must Follow)
 
-Implicit intents (auto-convert to task operations):
-
-- user states a future commitment: "I need to ...", "I have to ...", "I should ..."
-- user states a time-bound plan: "tomorrow morning", "next Monday", "at 10am", "before 5pm"
-- user states agenda-like items: "today I will ...", "this week I must ..."
-- user states reminders in natural language: "remind me to ...", "don't let me forget ..."
-
-Default behavior for implicit intents:
-
-1. If statement contains actionable work + time cue, treat as `create task`.
-2. If statement references an existing task and status cue ("done", "finished", "延期"), treat as update/complete.
-3. If ambiguity is low, execute automatically.
-4. If ambiguity is high (multiple candidate tasks, unclear date), ask one concise clarification question.
-
-## Intent Recognition Heuristics
-
-A sentence should be treated as actionable task intent when all are true:
-
-1. Contains an action verb or work noun (write, prepare, submit, meeting, homework, report, review, call).
-2. Contains a subject implied as user self-commitment ("I", "我", omitted first-person plan statement).
-3. Contains at least one scheduling or priority cue (date/time, "today", "tomorrow", "this week", "urgent", "before ...").
-
-If time is present but title is implicit, derive concise title from predicate phrase.
-
-Example:
-
-- Input: "我明天上午10点要写作业"
-- Extracted intent:
-  - title: `写作业`
-  - dueWithTime: tomorrow 10:00 (local timezone)
-  - operation: `POST /api/sync/ops` with `opType=CRT`, `entityType=TASK` (with pre/post sync)
-
-If date is present without exact time ("明天上午"), map to default time `10:00`.
-If only date is present ("明天"), set `dueDay` and leave `dueWithTime` empty.
+1. `GET /api/sync/ops` must always include `sinceSeq`.
+2. Every mutation must run this sequence:
+   `pre-pull(with sinceSeq) -> upload -> post-pull(with sinceSeq) -> verify in ops`.
+3. Mutation success is judged by op-log:
+   `POST /api/sync/ops` accepted + post-pull contains target `entityId`.
+4. Never judge failure only from `snapshot.state.task.ids`.
+5. Use UTF-8 body bytes for non-ASCII text.
+6. Use `requestId` for idempotency.
+7. Build vector clock from latest server clocks before each mutation.
+8. If clock merge fails, abort mutation (`VECTOR_CLOCK_NOT_MERGED`).
 
 ## Required Environment
 
-The skill requires only:
-
-- `SUPERSYNC_TOKEN`
-
-`SUPERSYNC_TOKEN` is the `primaryEnv` and can be injected by `skills.entries.<skill>.apiKey`.
-
-Defaults used by the skill runtime:
-
-- `baseUrl`: `https://sync.super-productivity.com` (unless runtime overrides it)
-- `clientId`: auto-generated from token claims and host fingerprint (no manual config needed)
+1. `SUPERSYNC_TOKEN` (primary env)
+2. Default runtime values:
+   - `baseUrl = https://sync.super-productivity.com`
+   - `clientId = derived from token/host`
 
 ## Runtime Workflow
 
-Apply this fixed execution loop:
+1. Parse intent.
+2. Pre-pull: `GET /api/sync/ops?sinceSeq=<lastSeq>&limit=<n>`.
+3. Build merged vector clock (see next section).
+4. Upload mutation via `POST /api/sync/ops`.
+5. Post-pull: `GET /api/sync/ops?sinceSeq=<preLatestSeq>&limit=<n>`.
+6. Verify target `entityId` and expected fields.
+7. Persist new `lastSeq`.
 
-1. `Intent -> Plan -> API -> Verify -> Respond`
-2. Before every write: run `GET /api/sync/ops` with current `sinceSeq` (required)
-3. Write via `POST /api/sync/ops`
-4. After write: run `GET /api/sync/ops` again with `sinceSeq` to verify server sequence progression
-5. Use idempotency key (`requestId`) for mutations
-6. Build mutation vector clock from latest server state (do not use stale local clock)
-7. On conflict: pull latest -> merge once -> retry once
+If conflict/rejection occurs: pull latest -> merge once -> retry once -> if still failing, return conflict report.
 
-If retry still fails, return a conflict report and stop mutation.
+## Vector Clock Hard Rule
 
-State handling:
+### Construction
 
-1. Persist `lastSeq` locally after every successful pull/upload.
-2. If `lastSeq` is unknown (first run), use `sinceSeq=0`.
-3. If server returns `gapDetected`, fetch/apply snapshot then continue from snapshot sequence.
+1. Start empty clock.
+2. Merge `snapshotVectorClock` (if present).
+3. Merge every returned `op.vectorClock`.
+4. Merge rule: keep max counter per key.
+5. Ensure current `clientId` exists, then increment by `+1`.
+6. Use resulting clock for outgoing op(s).
 
-## Operation Contract (Do Not Omit)
+### Invalid Patterns (Reject)
 
-Every uploaded operation for task changes must include:
+1. Isolated clock like `{ "<clientId>": 1 }` while server has history.
+2. Upload without pre-pull.
+3. Counter rollback/reset.
 
-1. `id` (UUID)
+### Quality Gate
+
+1. If server known clock has other keys, outgoing clock must not be single-key.
+2. Outgoing included counters must not be less than observed counters.
+3. On failure: stop and return `VECTOR_CLOCK_NOT_MERGED`.
+
+## Operation Contract
+
+Each task mutation op must include:
+
+1. `id`
 2. `clientId` (same as request-level `clientId`)
-3. `actionType` (for task: `[Task Shared] addTask` or `[Task Shared] updateTask`)
-4. `opType` (`CRT` for create, `UPD` for update/complete/reopen, `DEL` for delete)
-5. `entityType` = `TASK`
-6. `entityId` = target task id
-7. `payload` using `actionPayload` + `entityChanges` envelope
-8. `vectorClock` (merged from latest known server clocks)
-9. `timestamp` (epoch ms)
-10. `schemaVersion` (use latest observed server schema when available)
+3. `actionType`: `[Task Shared] addTask` or `[Task Shared] updateTask`
+4. `opType`: `CRT|UPD|DEL`
+5. `entityType`: `TASK`
+6. `entityId`: task id
+7. `payload`: `actionPayload + entityChanges` envelope
+8. `vectorClock`: merged clock
+9. `timestamp`: epoch ms
+10. `schemaVersion`: latest observed (normally `2`)
 
-Request-level fields for `POST /api/sync/ops`:
+`POST /api/sync/ops` request fields:
 
 1. `clientId`
 2. `ops` (1..100)
-3. optional `lastKnownServerSeq`
-4. optional but recommended `requestId`
+3. `lastKnownServerSeq` (recommended)
+4. `requestId` (recommended)
 
-## Encoding Rules (Mandatory)
-
-For any request containing non-ASCII text (for example Chinese task title/notes):
-
-1. Send `Content-Type: application/json; charset=utf-8`
-2. Send request body as UTF-8 bytes (not platform-default string encoding)
-3. After mutation, re-read the task and verify text fields are not mojibake/replacement chars
-
-## Chinese Task Examples (Create + Update)
-
-PowerShell example (UTF-8 safe):
+## Minimal PowerShell Template
 
 ```powershell
 $base = "https://sync.super-productivity.com"
 $token = $env:SUPERSYNC_TOKEN
 $clientId = "openclaw_cli_demo"
-$taskId = [guid]::NewGuid().ToString()
-$now = [DateTimeOffset]::Now.ToUnixTimeMilliseconds()
-$headers = @{ Authorization = "Bearer $token"; "Content-Type" = "application/json; charset=utf-8" }
-
-# 1) Create: 晚上6点吃饭
-$create = @{
-  clientId = $clientId
-  requestId = "req_$([guid]::NewGuid().ToString('N'))"
-  ops = @(
-    @{
-      id = [guid]::NewGuid().ToString()
-      clientId = $clientId
-      actionType = "[Task Shared] addTask"
-      opType = "CRT"
-      entityType = "TASK"
-      entityId = $taskId
-      payload = @{
-        actionPayload = @{
-          task = @{
-            id = $taskId
-            title = "晚上6点吃饭"
-            isDone = $false
-            projectId = "INBOX_PROJECT"
-            dueWithTime = $now
-          }
-        }
-        entityChanges = @()
-      }
-      vectorClock = @{ $clientId = 1 }
-      timestamp = $now
-      schemaVersion = 2
-    }
-  )
-} | ConvertTo-Json -Depth 12
-
-$createBytes = [System.Text.Encoding]::UTF8.GetBytes($create)
-Invoke-RestMethod -Uri "$base/api/sync/ops" -Method Post -Headers $headers -Body $createBytes
-
-# 2) Update title: 晚上7点吃饭
-$update = @{
-  clientId = $clientId
-  requestId = "req_$([guid]::NewGuid().ToString('N'))"
-  ops = @(
-    @{
-      id = [guid]::NewGuid().ToString()
-      clientId = $clientId
-      actionType = "[Task Shared] updateTask"
-      opType = "UPD"
-      entityType = "TASK"
-      entityId = $taskId
-      payload = @{
-        actionPayload = @{
-          task = @{
-            id = $taskId
-            changes = @{ title = "晚上7点吃饭" }
-          }
-        }
-        entityChanges = @()
-      }
-      vectorClock = @{ $clientId = 2 }
-      timestamp = ([DateTimeOffset]::Now.ToUnixTimeMilliseconds())
-      schemaVersion = 2
-    }
-  )
-} | ConvertTo-Json -Depth 12
-
-$updateBytes = [System.Text.Encoding]::UTF8.GetBytes($update)
-Invoke-RestMethod -Uri "$base/api/sync/ops" -Method Post -Headers $headers -Body $updateBytes
-```
-
-cURL example:
-
-```bash
-BASE_URL="https://sync.super-productivity.com"
-TOKEN="$SUPERSYNC_TOKEN"
-CLIENT_ID="openclaw_cli_demo"
-TASK_ID="task_$(date +%s)"
-NOW_MS=$(($(date +%s%N)/1000000))
-
-curl -sS "$BASE_URL/api/sync/ops" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json; charset=utf-8" \
-  --data-binary @- <<JSON
-{
-  "clientId": "$CLIENT_ID",
-  "requestId": "req_create_$NOW_MS",
-  "ops": [{
-    "id": "11111111-1111-4111-8111-111111111111",
-    "clientId": "$CLIENT_ID",
-    "actionType": "[Task Shared] addTask",
-    "opType": "CRT",
-    "entityType": "TASK",
-    "entityId": "$TASK_ID",
-    "payload": {
-      "actionPayload": {
-        "task": {
-          "id": "$TASK_ID",
-          "title": "晚上6点吃饭",
-          "isDone": false,
-          "projectId": "INBOX_PROJECT",
-          "dueWithTime": $NOW_MS
-        }
-      },
-      "entityChanges": []
-    },
-    "vectorClock": { "$CLIENT_ID": 1 },
-    "timestamp": $NOW_MS,
-    "schemaVersion": 2
-  }]
+$headers = @{
+  Authorization = "Bearer $token"
+  "Content-Type" = "application/json; charset=utf-8"
 }
-JSON
+
+function Merge-SuperSyncVectorClock {
+  param(
+    [Parameter(Mandatory = $true)] $PrePullResponse,
+    [Parameter(Mandatory = $true)] [string] $ClientId
+  )
+  $merged = @{}
+  if ($PrePullResponse.snapshotVectorClock) {
+    $PrePullResponse.snapshotVectorClock.PSObject.Properties | ForEach-Object {
+      $k = $_.Name; $v = [int]$_.Value
+      if (-not $merged.ContainsKey($k) -or $merged[$k] -lt $v) { $merged[$k] = $v }
+    }
+  }
+  foreach ($row in ($PrePullResponse.ops | Where-Object { $_.op -and $_.op.vectorClock })) {
+    $row.op.vectorClock.PSObject.Properties | ForEach-Object {
+      $k = $_.Name; $v = [int]$_.Value
+      if (-not $merged.ContainsKey($k) -or $merged[$k] -lt $v) { $merged[$k] = $v }
+    }
+  }
+  if (-not $merged.ContainsKey($ClientId)) { $merged[$ClientId] = 0 }
+  $merged[$ClientId] = [int]$merged[$ClientId] + 1
+  return $merged
+}
+
+# Pre-pull
+$lastSeq = 0
+$pre = Invoke-RestMethod -Uri "$base/api/sync/ops?sinceSeq=$lastSeq&limit=200" -Headers $headers -Method Get
+$clock = Merge-SuperSyncVectorClock -PrePullResponse $pre -ClientId $clientId
+
+# Gate: reject isolated clock when server already has history
+$knownKeys = @()
+if ($pre.snapshotVectorClock) { $knownKeys = @($pre.snapshotVectorClock.PSObject.Properties.Name) }
+if ($knownKeys.Count -gt 0 -and $clock.Keys.Count -le 1) {
+  throw "VECTOR_CLOCK_NOT_MERGED"
+}
 ```
 
-## API Auto-Call Rules
+## Mutation Verification Rules
 
-### A) Query command
+After upload, require all:
 
-1. If cache is stale or user asks to refresh: `GET /api/sync/ops?sinceSeq=<lastSeq>&limit=<n>`
-2. Build task view from op-log (`/api/sync/ops`) as primary source of truth
-3. Only if op-log is unavailable, use snapshot fallback and normalize both `state.task` and `state.TASK`
-4. For snapshot fallback, deduplicate by `taskId` and prefer newer `timestamp/modified`
-5. Never mark create/update as failed based only on `snapshot.state.task.ids`
-6. Return normalized schedule/task result
+1. `results[].accepted=true`
+2. post-pull includes target `entityId`
+3. fields match expected (`title`, `notes`, `dueWithTime` or `dueDay`)
 
-### B) Mutation command
-
-1. `GET /api/sync/ops?sinceSeq=<lastSeq>&limit=<n>` (pre-pull, required)
-2. `POST /api/sync/ops` (task create/update/complete/reopen encoded as operations)
-3. `GET /api/sync/ops?sinceSeq=<lastSeq>&limit=<n>` (post-pull, required)
-4. Verify by `taskId` that key fields (`title`, `notes`, `dueWithTime`/`dueDay`) match expected values
-5. Return `opId` / `serverSeq` and verification status
-
-For implicit creation intents, this sequence is mandatory and should run automatically without asking for API confirmation.
-
-### C) Manual sync command
-
-1. Run `GET /api/sync/ops?sinceSeq=<lastSeq>&limit=<n>` and `POST /api/sync/ops` cycle once
-2. Return fetched/applied/uploaded operation counts
-
-### D) Periodic sync command
-
-1. Schedule local timer in agent runtime
-2. On each tick execute manual sync cycle (`GET /api/sync/ops?sinceSeq=<lastSeq>&limit=<n>` + `POST /api/sync/ops` when needed)
-3. Persist last run state locally
+If any fail, mark mutation as failed and report diagnostic data.
 
 ## Safety Limits
 
-1. Do not use full snapshot overwrite APIs for normal task operations.
-2. Do not delete all sync data unless user explicitly requests destructive reset.
-3. If task target is ambiguous, query candidates first, then ask disambiguation.
-4. If post-write verification fails (encoding mismatch or wrong final state), issue one corrective `UPD` and verify again.
-5. Do not treat `GET /api/sync/snapshot` `state.task.ids` as the only success signal for op-based task creation; verify by uploaded op acceptance and follow-up `/api/sync/ops` presence first.
+1. Do not use full snapshot overwrite for normal task CRUD.
+2. Do not call destructive reset (`DELETE /api/sync/data`) unless explicitly requested.
+3. If post-write verification fails, allow one corrective `UPD` then re-verify once.
 
 ## Response Format
 
 For every mutation response include:
 
-- `action`: operation performed
-- `target`: task id/title
-- `sync`: latest sequence and verification result
-- `trace`: `requestId` and `opId` (if returned)
+1. `action`
+2. `target` (task id/title)
+3. `sync` (latest seq + verification status)
+4. `trace` (`requestId`, `opId`)
 
 ## OpenClaw Config Example
-
-Use `~/.openclaw/openclaw.json`:
 
 ```json
 {
@@ -333,12 +192,13 @@ Use `~/.openclaw/openclaw.json`:
 }
 ```
 
-## Validation and Debug
+## Validation Checklist
 
-1. Verify load: `openclaw skills list`
-2. Verify token injection: run `GET /api/sync/status` and confirm authenticated response
-3. Verify sync loop: mutation must produce `pull -> upload ops -> pull` sequence
-4. Reject any plan that uses `/v1/*`, `/api/v1/*`, `/sync`, or WebSocket-only assumptions for this host
-5. If snapshot parse fails or seems inconsistent, check for mixed `task` and `TASK` keys and switch verification to op-log based checks (`/api/sync/ops`).
-6. If pre-pull or post-pull was called without `sinceSeq`, treat the run as invalid and rerun from step 1.
-
+1. `openclaw skills list` shows this skill loaded.
+2. `GET /api/sync/status` succeeds with auth.
+3. Every mutation log contains pre-pull, upload, post-pull.
+4. `GET /api/sync/ops` calls always include `sinceSeq`.
+5. Debug log for mutation includes:
+   - source clock summary (`snapshotVectorClock` size, ops count)
+   - merged clock size and local counter
+   - quality gate pass/fail

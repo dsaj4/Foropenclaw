@@ -1,0 +1,7 @@
+interface:
+  display_name: "OpenClaw Time Sync Manager"
+  short_description: "Runs time-management actions through sync-first APIs for local/cloud consistency."
+  default_prompt: "Use $openclaw-time-sync-manager to handle this schedule request and keep local and cloud data in sync."
+
+policy:
+  allow_implicit_invocation: true
